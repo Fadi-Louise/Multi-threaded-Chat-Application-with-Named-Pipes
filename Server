@@ -1,0 +1,271 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <semaphore.h>
+
+#define MAX_CLIENTS 10
+#define MAX_MESSAGE_SIZE 256
+#define PIPE_NAME "server_pipe"
+
+// Structure to represent a connected client
+typedef struct
+{
+  int pipe_fd;			// Pipe file descriptor for communication with the client
+  pthread_t thread_id;		// Thread ID for handling client communication
+} Client;
+
+// Global variables
+Client clients[MAX_CLIENTS];
+int client_count = 0;
+sem_t mutex;			// Semaphore for synchronization
+
+/**
+ * @brief Function to handle communication with a client
+ *
+ * @param arg A pointer to a Client structure
+ * @return NULL
+ */
+void *
+handle_client (void *arg)
+{
+  // Postcondition: The thread handles communication with a connected client.
+  Client *current_client = (Client *) arg;
+  int client_pipe_fd = current_client->pipe_fd;
+
+  char buffer[MAX_MESSAGE_SIZE];
+  ssize_t bytes_read;
+
+  while (1)
+    {
+      // Wait on the semaphore before entering the critical section
+      sem_wait (&mutex);
+
+      // Read the message from the client
+      bytes_read = read (client_pipe_fd, buffer, sizeof (buffer) - 1);
+      if (bytes_read <= 0)
+	{
+	  // Connection closed or error occurred
+	  sem_post (&mutex);	// Release the semaphore before exiting
+	  break;
+	}
+      buffer[bytes_read] = '\0';
+
+      // Print the received message from the client
+      printf ("Server: Received from client %d: %s\n", client_pipe_fd,
+	      buffer);
+
+      // Broadcast the message to all clients
+      for (int i = 0; i < client_count; ++i)
+	{
+	  if (clients[i].pipe_fd != client_pipe_fd)
+	    {
+	      write (clients[i].pipe_fd, buffer, bytes_read);
+	    }
+	}
+
+      // Release the semaphore after the critical section
+      sem_post (&mutex);
+    }
+
+  // Handle client disconnection
+  sem_wait (&mutex);		// Wait on the semaphore before entering the critical section
+  for (int i = 0; i < client_count; ++i)
+    {
+      if (current_client == &clients[i])
+	{
+	  // Remove the client from the array
+	  for (int j = i; j < client_count - 1; ++j)
+	    {
+	      clients[j] = clients[j + 1];
+	    }
+	  --client_count;
+	  break;
+	}
+    }
+  sem_post (&mutex);		// Release the semaphore after the critical section
+
+  // Close the client's pipe
+  close (client_pipe_fd);
+
+  return NULL;
+}
+
+/**
+ * @brief Function to broadcast a message to all connected clients
+ *
+ * @param message The message to broadcast
+ */
+void
+broadcast_message (const char *message)
+{
+  // Wait on the semaphore before entering the critical section
+  sem_wait (&mutex);
+
+  // Broadcast the message to all clients
+  for (int i = 0; i < client_count; ++i)
+    {
+      write (clients[i].pipe_fd, message, strlen (message));
+    }
+
+  // Release the semaphore after the critical section
+  sem_post (&mutex);
+}
+
+/**
+ * @brief Function to initialize the server
+ */
+void
+initialize_server ()
+{
+  // Precondition: The server program has been compiled and executed successfully.
+  // Precondition: The system supports POSIX threads and named pipes.
+  // Precondition: The required libraries (stdio.h, stdlib.h, unistd.h, pthread.h, fcntl.h, sys/stat.h, string.h, semaphone.h) are available and properly linked.
+  // Precondition: The PIPE_NAME constant is defined and corresponds to a valid pipe name.
+  // Precondition: The server has appropriate permissions to create, open, and unlink named pipes.
+
+  // Postcondition: The server has been successfully initialized.
+  // Postcondition: A named pipe (PIPE_NAME) for server communication has been created.
+  // Postcondition: The semaphore (mutex) for synchronization has been initialized.
+
+  // Create a named pipe for server communication
+  mkfifo (PIPE_NAME, 0666);
+  printf ("Server: Server initialized.\n");
+
+  // Initialize the semaphore
+  sem_init (&mutex, 0, 1);
+}
+
+/**
+ * @brief Function to handle client disconnection
+ *
+ * @param index Index of the disconnected client in the clients array
+ */
+void
+handle_disconnection (int index)
+{
+  // Wait on the semaphore before entering the critical section
+  sem_wait (&mutex);
+
+  // Get the disconnected client
+  Client disconnected_client = clients[index];
+
+  // Remove the client from the array
+  for (int i = index; i < client_count - 1; ++i)
+    {
+      clients[i] = clients[i + 1];
+    }
+  --client_count;
+
+  // Release the semaphore after the critical section
+  sem_post (&mutex);
+
+  // Wait for the client's thread to finish
+  pthread_join (disconnected_client.thread_id, NULL);
+
+  // Close the client's pipe
+  close (disconnected_client.pipe_fd);
+
+  printf ("Server: Client disconnected.\n");
+}
+
+/**
+ * @brief Function to clean up resources when the server exits
+ */
+void
+cleanup_server ()
+{
+  // Precondition: The server has been initialized.
+
+  // Postcondition: The server has been cleaned up.
+  // Postcondition: The named pipe (server_pipe) has been closed.
+  // Postcondition: The named pipe (PIPE_NAME) has been unlinked.
+
+  // Close and unlink the named pipe
+  close (clients[0].pipe_fd);	// Close the server pipe
+  unlink (PIPE_NAME);
+  printf ("Server: Server cleaned up.\n");
+}
+
+/**
+ * @brief Main function to run the server
+ *
+ * @return 0 on success
+ */
+int
+main ()
+{
+  initialize_server ();
+
+  while (1)
+    {
+      // Open the named pipe for accepting client connections
+      int server_pipe = open (PIPE_NAME, O_RDONLY);
+      if (server_pipe == -1)
+	{
+	  perror ("Server: Error opening server pipe");
+	  exit (EXIT_FAILURE);
+	}
+
+      // Wait for a client to connect
+      char client_pipe_name[50];
+      if (read (server_pipe, client_pipe_name, sizeof (client_pipe_name)) ==
+	  -1)
+	{
+	  perror ("Server: Error reading client pipe name");
+	  close (server_pipe);
+	  exit (EXIT_FAILURE);
+	}
+      close (server_pipe);
+
+      // Open the client pipe for bidirectional communication
+      int client_pipe = open (client_pipe_name, O_RDWR);
+      if (client_pipe == -1)
+	{
+	  perror ("Server: Error opening client pipe");
+	  continue;		// Continue to the next iteration to wait for another client
+	}
+
+      // Create a new client structure
+      Client new_client;
+      new_client.pipe_fd = client_pipe;
+
+      // Lock the mutex before accessing shared resources
+      sem_wait (&mutex);	// Wait on the semaphore before entering the critical section
+
+      // Add the new client to the array
+      if (client_count < MAX_CLIENTS)
+	{
+	  clients[client_count++] = new_client;
+	  printf ("Server: Client connected.\n");
+	}
+      else
+	{
+	  // Reject the connection if the server is at full capacity
+	  close (client_pipe);
+	  printf
+	    ("Server: Connection rejected: Server is at full capacity.\n");
+	}
+
+      // Unlock the mutex after accessing shared resources
+      sem_post (&mutex);	// Release the semaphore after the critical section
+
+      // Create a new thread to handle communication with the client
+      if (pthread_create
+	  (&new_client.thread_id, NULL, handle_client,
+	   (void *) &new_client) != 0)
+	{
+	  perror ("Server: Error creating thread");
+	  close (client_pipe);
+	  exit (EXIT_FAILURE);
+	}
+    }
+
+  // Clean up resources when the server exits
+  cleanup_server ();
+
+  return 0;
+}

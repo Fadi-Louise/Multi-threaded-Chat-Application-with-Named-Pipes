@@ -1,0 +1,159 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <pthread.h>
+
+#define SERVER_PIPE "server_pipe"
+#define MAX_MESSAGE_SIZE 256
+#define AUTH_TOKEN "secret_token"
+
+// Structure to represent a connected client
+typedef struct
+{
+  int pipe_fd;			// Pipe file descriptor for communication with the server
+} Client;
+
+/**
+ * @brief Function to handle communication with the server
+ *
+ * @param arg A pointer to a Client structure
+ * @return NULL
+ */
+void *
+handle_server_communication (void *arg)
+{
+  // Postcondition: The thread handles communication with the server.
+  Client *client = (Client *) arg;
+  int server_pipe_fd = client->pipe_fd;
+
+  char buffer[MAX_MESSAGE_SIZE];
+  ssize_t bytes_read;
+
+  while (1)
+    {
+      // Read the message from the server
+      bytes_read = read (server_pipe_fd, buffer, sizeof (buffer) - 1);
+      if (bytes_read <= 0)
+	{
+	  // Connection closed or error occurred
+	  break;
+	}
+      buffer[bytes_read] = '\0';
+
+      // Display the received message
+      printf ("Received From Server: %s\n", buffer);
+    }
+
+  // Handle disconnection from the server
+  close (server_pipe_fd);
+
+  return NULL;
+}
+
+int
+main ()
+{
+  // Precondition: The client program has been compiled and executed successfully.
+  // Precondition: The system supports POSIX threads and named pipes.
+  // Precondition: The required libraries (stdio.h, stdlib.h, unistd.h, fcntl.h, sys/stat.h, string.h, pthread.h) are available and properly linked.
+  // Precondition: The SERVER_PIPE constant is defined and corresponds to the correct server pipe name.
+  // Precondition: The AUTH_TOKEN constant is defined and contains the correct authentication token.
+  // Precondition: The server is running and waiting for client connections.
+  // Precondition: The server has appropriate permissions to open the server pipe and create named pipes for communication.
+
+  // Create a named pipe for client-server communication
+  char client_pipe_name[50];
+  sprintf (client_pipe_name, "client_%d_pipe", getpid ());
+  mkfifo (client_pipe_name, 0666);
+
+  // Connect to the server
+  int server_pipe = open (SERVER_PIPE, O_WRONLY);
+  if (server_pipe == -1)
+    {
+      perror ("Error connecting to the server");
+      exit (EXIT_FAILURE);
+    }
+
+  // Send the client pipe name and authentication token to the server
+  write (server_pipe, client_pipe_name, strlen (client_pipe_name) + 1);
+  write (server_pipe, AUTH_TOKEN, strlen (AUTH_TOKEN) + 1);
+  close (server_pipe);
+
+  // Open the client pipe for bidirectional communication
+  int client_pipe = open (client_pipe_name, O_RDWR);
+  if (client_pipe == -1)
+    {
+      perror ("Error opening client pipe");
+      exit (EXIT_FAILURE);
+    }
+
+  // Validate the authentication response
+  char auth_response[MAX_MESSAGE_SIZE];
+  if (strcmp (auth_response, "authenticated") == 0)
+    {
+      // Authentication failed, close the client pipe
+      printf ("Authentication failed. Disconnecting.\n");
+      close (client_pipe);
+      unlink (client_pipe_name);
+      exit (EXIT_FAILURE);
+    }
+
+  // Authentication succeeded, notify the user
+  printf ("Authenticated successfully. You can start sending messages.\n");
+
+  // Create a client structure
+  Client client;
+  client.pipe_fd = client_pipe;
+
+  // Create a new thread to handle communication with the server
+  pthread_t server_communication_thread;
+  if (pthread_create
+      (&server_communication_thread, NULL, handle_server_communication,
+       (void *) &client) != 0)
+    {
+      perror ("Error creating thread");
+      close (client_pipe);
+      unlink (client_pipe_name);
+      exit (EXIT_FAILURE);
+    }
+
+  // Postcondition: The client has successfully connected to the server and initiated communication.
+
+  // Read messages from the user and send them to the server
+  char message[MAX_MESSAGE_SIZE];
+  while (1)
+    {
+      printf ("Enter message: ");
+      fgets (message, sizeof (message), stdin);
+
+      // Remove newline character from the message
+      size_t len = strlen (message);
+      if (len > 0 && message[len - 1] == '\n')
+	{
+	  message[len - 1] = '\0';
+	}
+
+      // Send the message to the server
+      write (client_pipe, message, strlen (message) + 1);
+
+      // Check for the exit command
+      if (strcmp (message, "exit") == 0)
+	{
+	  break;
+	}
+    }
+
+  // Wait for the server communication thread to finish
+  pthread_join (server_communication_thread, NULL);
+
+  // Close and unlink the client pipe
+  close (client_pipe);
+  unlink (client_pipe_name);
+
+  // Postcondition: The client has finished communication with the server and cleaned up resources.
+
+  return 0;
+}
